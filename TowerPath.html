@@ -1,0 +1,1801 @@
+<!DOCTYPE html>
+<!--
+//---------------------------------------
+20171015
+ 
+Modifications by Bill Piedra:
+
+fcnExportWinding:
+ 
+    Added linebreak using \r\n instead of <br> in function fcnExportWinding
+    Formatted CSV for import into Litchi.
+    Added alert to notify user of download
+    Limited Output to 99 Records for DJI Drones
+ 
+New function: download(filename,text) - downloads CSV textfile to
+    local machine download folder.
+ 
+TODO:   JSON to mySQL for location processing.
+        Add checkbox for DJI Missions
+ 
+//---------------------------------------
+20161017
+Build camera graphics for each HOI node
+Make selection of HOI nodes persistent
+Make HOI cameras visible whenever its HOI node is selected
+Create infrastructure for selection and deselection of path nodes
+Started evolving mouse button interpretation to control better selection
+//---------------------------------------
+20161013
+Reset view center on tower move
+Renamed the example data cameras and paths
+Rebuild GUI technology
+Added extensible list of HOI that can be individually modified
+//---------------------------------------
+20161004
+Added ground plane based on map image.
+Added ability to manuall locate the tower on the map via dragging.
+    Ground map is not aware of its true size or coordinates.
+Changed view controls from trackball to turntable.
+Default most visibilities off.
+//---------------------------------------
+20160908
+TODO (OR CONSIDER) :
+Multiple views. 3D, Elevation, Plan, Map? 4-way split screen?
+Camera placements to automatically calculate view fields.
+Addition of negative bodies.
+Bodies defined by rectangles instead of squares. Rectangles not necessarily aligned with world coordinates.
+More on-selection controls. Maybe Camera geometry only appears for selected node.
+Taming the corners of smooth paths, if we keep them.
+Consider drawing bodies on real maps.
+Output?
+Consider Orbital view control instead of Trackball. I'm NOT happy with the default Three.js controls.
+//---------------------------------------
+20170203
+Added hard coded location of tower base and mission take off base
+Added button  Winding to export the lat,long,alt to a separate browser tab
+//---------------------------------------
+-->
+<html lang="en">
+	<head>
+		<title>VertSpec Tower Path Editor</title>
+		<meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, user-scalable=yes, minimum-scale=1.0, maximum-scale=1.0">
+     
+		<style>
+			body {
+				font-family: Monospace;
+				background-color: #f0f0f0;
+				margin: 0px;
+				overflow: hidden;
+			}
+		</style>
+	</head>
+	<body>
+
+		<script src="./lib/three.js-master/build/three.js"></script>
+		<script src="./lib/three.js-master/examples/js/libs/dat.gui.min.js"></script>
+		<script src="./lib/three.js-master/examples/js/controls/TrackballControls.js"></script>
+        <script src="./lib/three.js-master/examples/js/controls/OrbitControls.js"></script>
+		<script src="./lib/three.js-master/examples/js/libs/stats.min.js"></script>
+        <script src="./lib/three.js-master/examples/js/libs/tween.min.js"></script>
+        
+        <script src="TowerSite.js"></script>
+		
+		<script>
+        
+            var bSqueak = true;
+
+			var container, stats;
+			var camera, controls, scene, renderer;
+			var objects = [];
+			var plane = new THREE.Plane();
+			var raycaster = new THREE.Raycaster();
+			var mouse = new THREE.Vector2(),
+			offset = new THREE.Vector3(),
+			intersection = new THREE.Vector3(),
+			INTERSECTED, SELECTED;
+            var bMouseIsDown = false;
+            var pathLineWidth = 3;
+            var towerObject = new THREE.Object3D();
+            towerObject.name = "towerBag";
+            var towerLocation = new THREE.Vector3();
+            var towerPlane = new THREE.Plane();
+            var bTowerMoved = false;
+            towerPlane.setFromNormalAndCoplanarPoint(
+                                                     new THREE.Vector3(0,1,0),
+                                                     new THREE.Vector3(0,0,0)
+                                                     );
+			var pathDataGeometries = [];
+			var pathDataGraphics = [];
+			var towerDataGeometries = [];
+			var towerDataGraphics = [];
+
+            var radius_earth_feet = 20903520; // yes, that's feet as in 3,959 miles * 5,280 feet/mile
+            
+            var stringExportWinding = '';
+            
+            //--------------------------------------
+            // options params
+            //--------------------------------------
+            //var options_params = {};
+            var options_params =
+            {
+                hTower: 200,
+                wTower: 40,
+                clearanceTower: 10,
+                numHeightsOfInterest: 6,
+                numPointsOfInterestPerHeight: 8,
+                cameraSize: 10
+            };
+        
+            var default_Height_Of_New_HOI = 200; // 200'
+            var default_Number_Of_POI_For_New_HOI = 1;
+        
+            //--------------------------------------
+            // options hoi
+            //--------------------------------------
+            var options_hoi = {}; // declared
+            options_hoi[get_HOI_num_key()] = 0; // initially there are no HOI
+            
+            //--------------------------------------
+            // options vis
+            //--------------------------------------
+            var options_vis = {};
+            options_vis['path_rect_updown'] = false;
+            //options_vis['path_smooth_updown'] = false;
+            options_vis['path_rect_around'] = false;
+            options_vis['path_hois'] = true;
+            options_vis['path_hoi_node'] = true;
+            options_vis['path_hoi_camera'] = false;
+            //options_vis['path_smooth_around'] = false;
+            options_vis['path_example_poi_nodes'] = false;
+            options_vis['path_example_cameras'] = false;
+            options_vis['tower'] = true;
+            
+            //----------------------------------------
+            // list of static folders "addFolder"
+            //----------------------------------------
+            var gui = null;
+            var gui_params = null;
+            var gui_vis = null;
+            var gui_hoi = null;
+            var gui_params_tower = null;
+            var gui_params_example = null;
+            var gui_vis_example = null;
+            var gui_hoi_idx = [];
+            //----------------------------------------
+            // list of static gui folders open / closed state
+            // the value here is the default value on start
+            //----------------------------------------
+            var gui_params_closed = false;
+            var gui_hoi_closed = false;
+            var gui_vis_closed = false;
+            var gui_params_tower_closed = true;
+            var gui_params_example_closed = true;
+            var gui_vis_example_closed = true;
+            var gui_hoi_idx_closed = [];
+
+        
+        //--------------------------------------
+			var viewLineMaterial = new THREE.LineBasicMaterial({color: 0x000000});
+			var viewLineDashedMaterial = new THREE.LineDashedMaterial({color: 0x888888, dashSize: 1, gapSize: 3});
+			var eyeballMaterial = new THREE.MeshLambertMaterial( { color: 0xff0000 } );
+			var towerBoxMaterial = new THREE.MeshLambertMaterial( { color: 0xff0000, opacity: 0.5, transparent: true } );
+
+			init();
+			animate();
+
+            //----------------------------------------
+			function init() {
+
+                //squeak('hello console');
+
+				container = document.createElement( 'div' );
+				document.body.appendChild( container );
+
+rebuildGUI();
+				camera = new THREE.PerspectiveCamera( 70, window.innerWidth / window.innerHeight, 1, 5000 );
+				camera.position.x = 500;
+				camera.position.y = 500;
+				camera.position.z = 800;
+
+				scene = new THREE.Scene();
+
+				scene.add( new THREE.AmbientLight( 0x505050 ) );
+
+				var light = new THREE.SpotLight( 0xffffff, 1.5 );
+				light.position.set( 0, 500, 2000 );
+				light.castShadow = true;
+
+				light.shadow = new THREE.LightShadow( new THREE.PerspectiveCamera( 50, 1, 200, 10000 ) );
+				light.shadow.bias = - 0.00022;
+
+				light.shadow.mapSize.width = 2048;
+				light.shadow.mapSize.height = 2048;
+
+				scene.add( light );
+				
+				// coord axis
+				//var axisHelper = new THREE.AxisHelper( 500 );
+				//scene.add( axisHelper );
+                
+                
+                
+				/*
+				var xAxisGeometry = new THREE.Geometry();
+				xAxisGeometry.vertices.push(
+					new THREE.Vector3( 0, 0, 0 ),
+					new THREE.Vector3( 100, 0, 0 )
+				);
+				var xAxisMaterial = new THREE.LineBasicMaterial({
+					color: 0x0000ff,
+					linewidth: 5
+				});
+				var xAxisLine = new THREE.Line( xAxisGeometry, xAxisMaterial );
+				scene.add( xAxisLine );
+				objects.push( xAxisLine );
+				*/
+                
+                //---------------------------------------
+                // initial hack testing of png on face
+                // lets paint some ground
+                //---------------------------------------
+                var groundGeometry = new THREE.Geometry();
+                // push some vertices in - the xyz coords of the ground
+                groundGeometry.vertices.push( new THREE.Vector3(    0.0,  0.0,    0.0 ) ); // 0
+                groundGeometry.vertices.push( new THREE.Vector3( 1000.0,  0.0,    0.0 ) ); // 1
+                groundGeometry.vertices.push( new THREE.Vector3( 1000.0,  0.0, 1000.0 ) ); // 2
+                groundGeometry.vertices.push( new THREE.Vector3(    0.0,  0.0, 1000.0 ) ); // 3
+                
+                // define uv coords of the ground
+                var uvs =
+                [
+                    new THREE.Vector2(0, 1), // 0
+                    new THREE.Vector2(1, 1), // 1
+                    new THREE.Vector2(1, 0), // 2
+                    new THREE.Vector2(0, 0)  // 3
+                ];
+                // associate uvs with faces
+                groundGeometry.faceVertexUvs[0] = [];
+                groundGeometry.faceVertexUvs[0][0] = [ uvs[0], uvs[1], uvs[2] ];
+                groundGeometry.faceVertexUvs[0][1] = [ uvs[0], uvs[2], uvs[3] ];
+                // push some faces in
+                //groundGeometry.faces.push( new THREE.Face4 ( 0, 1, 2, 3) );
+                groundGeometry.faces.push( new THREE.Face3 ( 0, 1, 2) );
+                groundGeometry.faces.push( new THREE.Face3 ( 0, 2, 3) );
+                // gritty stuff
+                groundGeometry.computeBoundingSphere();
+                groundGeometry.computeFaceNormals();
+                var groundTexture = new THREE.ImageUtils.loadTexture('TowerSiteMap.png');
+                //var groundTexture = new THREE.ImageUtils.loadTexture('http://i.imgur.com/3tU4Vig.jpg');
+                var groundMaterial = new THREE.MeshPhongMaterial( { map: groundTexture} );
+                groundMaterial.side = THREE.DoubleSide;
+                var mesh= new THREE.Mesh( groundGeometry, groundMaterial );
+                scene.add(mesh);
+                //---------------------------------------
+                
+				rebuildTowers();
+				rebuildFlightPaths();
+				
+				renderer = new THREE.WebGLRenderer( { antialias: true } );
+				renderer.setClearColor( 0xf0f0f0 );
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				renderer.sortObjects = false;
+				renderer.shadowMap.enabled = true;
+				renderer.shadowMap.type = THREE.PCFShadowMap;
+
+				container.appendChild( renderer.domElement );
+
+				var info = document.createElement( 'div' );
+				info.style.position = 'absolute';
+				info.style.top = '10px';
+				info.style.width = '100%';
+				info.style.textAlign = 'center';
+				//info.innerHTML = '<a href="http://threejs.org" target="_blank">three.js</a> webgl - draggable cubes';
+				
+				container.appendChild( info );
+
+				stats = new Stats();
+				container.appendChild( stats.dom );
+
+				renderer.domElement.addEventListener( 'mousemove', onDocumentMouseMove, false );
+				renderer.domElement.addEventListener( 'mousedown', onDocumentMouseDown, false );
+				renderer.domElement.addEventListener( 'mouseup', onDocumentMouseUp, false );
+
+				//
+
+				window.addEventListener( 'resize', onWindowResize, false );
+
+/*
+                // TRACKBALL CONTROLS
+				controls = new THREE.TrackballControls( camera, renderer.domElement );
+				controls.rotateSpeed = 1.0;
+				controls.zoomSpeed = 1.2;
+				controls.panSpeed = 0.8;
+				controls.noZoom = false;
+				controls.noPan = false;
+				controls.staticMoving = true;
+				controls.dynamicDampingFactor = 0.3;
+ */
+                // ORBIT / TURNTABLE CONTROLS
+                controls = new THREE.OrbitControls( camera, renderer.domElement );
+                controls.enableDamping = true;
+                controls.dampingFactor = 0.25;
+                controls.maxPolarAngle = Math.PI/2;
+                //controls.enableZoom = false;
+			}
+			
+            //----------------------------------------
+            function transformLocalCoordsToLatitude(originLatitude, originLongitude, dx, dy) // dx, dy in feet
+            {
+                //squeak('lat='+lat+' long='+long+' dx='+dx+' dy='+dy);
+                var latitude = originLatitude + ( dy / radius_earth_feet ) * ( 180 / Math.PI );
+                return latitude;
+            }
+        
+            //----------------------------------------
+            function transformLocalCoordsToLongitude(originLatitude, originLongitude, dx, dy) // dx, dy in feet
+            {
+                var longitude = originLongitude + ( dx / radius_earth_feet ) * ( 180 / Math.PI ) / Math.cos( originLatitude * Math.PI / 180 );
+                return longitude;
+            }
+        
+            //----------------------------------------
+            function transformLatitudeToLocalCoords(originLatitude, originLongitude, latitude, longitude)
+            {
+                var dy = (latitude - originLatitude) * (radius_earth_feet * Math.PI / 180);
+                return dy;
+            }
+        
+            //----------------------------------------
+            function transformLongitudeToLocalCoords(originLatitude, originLongitude, latitude, longitude)
+            {
+                var dx = (longitude - originLongitude) * (radius_earth_feet * Math.PI / 180) * Math.cos(originLatitude * Math.PI / 180);
+                return dx;
+            }
+        
+            //----------------------------------------
+			function setPathVis(name, value)
+			{
+				for( var i = 0; i < pathDataGraphics.length; i++ )
+				{
+					if(pathDataGraphics[i].name == name)
+					{
+						pathDataGraphics[i].visible = value;
+					}
+				}
+			}
+			
+            //----------------------------------------
+            function setCameraVis(name, idxHOI, idxNode, value)
+            {
+                //squeak("setCameraVis " + name + " " + idxHOI + " " + idxNode + " " + value);
+                //squeak("pathDataGraphics.length = " + pathDataGraphics.length);
+                for( var i = 0; i < pathDataGraphics.length; i++ )
+                {
+                    if(pathDataGraphics[i].name == name)
+                    {
+                        if(pathDataGraphics[i].userData.hoi == idxHOI && pathDataGraphics[i].userData.turn == idxNode)
+                        {
+                            pathDataGraphics[i].visible = value;
+                        }
+                    }
+                }
+            }
+        
+            //----------------------------------------
+			function wipeTowerData()
+			{
+				for( var i = 0; i < towerDataGraphics.length; i++ )
+				{
+					scene.remove( towerDataGraphics[i] );
+                    towerObject.remove( towerDataGraphics[i] );
+				}
+				towerDataGraphics.length = 0;
+				
+				for( var j = 0; j < towerDataGeometries.length; j++ )
+				{
+					towerDataGeometries[j].dispose();
+				}
+				towerDataGeometries.length = 0;
+                
+                // this just removes those objects named "tower" from the objects list
+                //for( var k = 0; k < objects.length; k++)
+                for(var k=objects.length-1; k>=0; k--)
+                {
+                    if( objects[k].name == "tower")
+                    {
+                        objects.splice(k, 1);
+                    }
+                }
+			}
+			
+            //----------------------------------------
+			function rebuildTowers()
+			{
+				wipeTowerData();
+                
+				// initial tower bbox
+				var boxGeometry = new THREE.BoxGeometry( options_params.wTower, options_params.hTower, options_params.wTower );
+				towerDataGeometries.push(boxGeometry);
+
+                var boxObject = new THREE.Mesh( boxGeometry, towerBoxMaterial );
+                //boxObject.delete();
+                //delete boxObject;
+                //boxObject = new THREE.Mesh( boxGeometry, towerBoxMaterial );
+                
+				boxObject.name = "tower"
+				boxObject.visible = options_vis.tower;
+                
+            //boxObject.position.copy (towerLocation);
+				boxObject.position.y = options_params.hTower / 2; // put it's center at origin
+                
+				boxObject.castShadow = true;
+				boxObject.receiveShadow = true;
+            //scene.add( boxObject );
+            towerDataGraphics.push(boxObject);
+				objects.push( boxObject );
+				
+				// bbox of tower
+				var bboxObject = new THREE.BoxHelper( boxObject );
+				bboxObject.name = "tower"
+				bboxObject.visible = options_vis.tower;
+            //scene.add( bboxObject );
+            towerDataGraphics.push(bboxObject);
+                // we don't need to select this bbox
+				//objects.push( bboxObject );
+                
+                towerObject.position.x = towerLocation.x;
+                towerObject.position.y = towerLocation.y;
+                towerObject.position.z = towerLocation.z;
+                
+            towerObject.add(boxObject);
+            towerObject.add(bboxObject);
+                
+                var axisHelper = new THREE.AxisHelper( 500 );
+                towerObject.add( axisHelper);
+                
+                scene.add( towerObject );
+			}
+			
+            //----------------------------------------
+			function setTowerVis(name, value)
+			{
+				for( var i = 0; i < towerDataGraphics.length; i++ )
+				{
+					if(towerDataGraphics[i].name == name)
+					{
+						towerDataGraphics[i].visible = value;
+					}
+				}
+			}
+			
+            //----------------------------------------
+			function wipeFlightPaths()
+			{
+				for( var i = 0; i < pathDataGraphics.length; i++ )
+				{
+					scene.remove( pathDataGraphics[i] );
+                    towerObject.remove( pathDataGraphics[i] );
+				}
+				pathDataGraphics.length = 0;
+				
+				for( var j = 0; j < pathDataGeometries.length; j++ )
+				{
+					pathDataGeometries[j].dispose();
+				}
+				pathDataGeometries.length = 0;
+                
+                // this just removes those objects named "path_hoi_node" from the objects list
+                //for( var k = 0; k < objects.length; k++)
+                for(var k=objects.length-1; k>=0; k--)
+                {
+                    if( objects[k].name == "path_hoi_node")
+                    {
+                        objects.splice(k, 1);
+                    }
+                }
+			}
+			//----------------------------------------
+            function getColumnRadius()
+            {
+                var r = Math.sqrt(options_params.wTower * options_params.wTower / 2) + options_params.clearanceTower;
+                return r;
+            }
+        
+            //----------------------------------------
+			function rebuildFlightPaths()
+			{
+				// first clean up
+				wipeFlightPaths();
+                
+				// now we want to create numHeightsOfInterest * numPointsOfInterestPerHeight spheres
+
+				var cameraNodeGeometry = new THREE.SphereGeometry( 3, 8, 8 );
+				pathDataGeometries.push(cameraNodeGeometry);
+				
+				// what's the radius of out column of cameras?
+				
+                var columnRadius = getColumnRadius();
+				var columnUp = new THREE.Vector3(0, 1, 0);
+
+                //-------------------------------
+                // BEGIN EXAMPLE HOI CONSTRUCTION
+                //-------------------------------
+                
+				var poiArr = new Array(options_params.numHeightsOfInterest);
+			
+				// for each height
+				for ( var i = 1; i <= options_params.numHeightsOfInterest; i++ )
+				{
+				
+					var y = i / options_params.numHeightsOfInterest * options_params.hTower;
+				
+					// what is the center of that ring?
+					var viewTargetPoint = new THREE.Vector3( 0, y, 0 )
+
+					poiArr[i-1] = new Array(options_params.numPointsOfInterestPerHeight);
+					
+					// for each turn
+					for ( var j = 0; j < options_params.numPointsOfInterestPerHeight; j++ )
+					{
+						// identify a point of interest
+						var radIncrement = j / options_params.numPointsOfInterestPerHeight * 2 * Math.PI;
+						var x = columnRadius * Math.cos(radIncrement);
+						//var y = i / numHeightsOfInterest * options_params.hTower;
+						var z = columnRadius * Math.sin(radIncrement);
+                        
+						//---------------------------------------------
+						// put a little ball there
+                        // this ball will be the root of the drone camera position
+						//---------------------------------------------
+						var poiObject = new THREE.Mesh( cameraNodeGeometry, eyeballMaterial );
+						poiObject.name = "path_example_poi_nodes";
+						poiObject.visible = options_vis.path_example_poi_nodes;
+
+						poiObject.position.x = x;
+						poiObject.position.y = y;
+						poiObject.position.z = z;
+
+ 						squeak("x = " + towerLocation.x);
+                        
+                        //scene.add( poiObject ); // this makes sure it gets drawn
+                        pathDataGraphics.push( poiObject ); // this allows ut to track it for cleanup
+                        
+                        // now if i instead want to make this poiObject a child of the towerObjec
+                        // then i need to clean it up from
+                        
+                        towerObject.add( poiObject);
+                        //boxObject.add (poiObject);
+                        
+						
+						//objects.push( poiObject );
+					
+						poiArr[i-1][j] = new THREE.Vector3(x, y, z);
+                        //squeak('x='+x+' y='+y+' z='+z);
+						
+                        // all of these next objects should become children of the poi node
+                        // what does that mean?
+                        // lets find out
+                        
+                            //---------------------------------------------
+                            // eye target line
+                            //---------------------------------------------
+                            var eyeTargetLineGeometry = new THREE.Geometry();
+                            eyeTargetLineGeometry.vertices.push( poiObject.position, viewTargetPoint );
+                            eyeTargetLineGeometry.computeLineDistances(); // magic without which dash doesn't work
+                            pathDataGeometries.push( eyeTargetLineGeometry );
+                            var eyeTargetLine = new THREE.Line( eyeTargetLineGeometry, viewLineDashedMaterial );
+                            eyeTargetLine.name = "path_example_cameras";
+                            eyeTargetLine.visible = options_vis.path_example_cameras;
+                            //scene.add( eyeTargetLine );
+                            towerObject.add( eyeTargetLine );
+                            //poiObject.add( eyeTargetLine );
+                            pathDataGraphics.push( eyeTargetLine );
+                            
+                            //-----------------------------------------------
+                            // forward line
+                            //-----------------------------------------------
+                            var forwardDir = new THREE.Vector3();
+                            forwardDir.subVectors(viewTargetPoint, poiObject.position);
+                            forwardDir.normalize();
+                                    
+                            var forwardLineEndPoint = new THREE.Vector3();
+                            forwardLineEndPoint.copy(poiObject.position);
+                            forwardLineEndPoint.addScaledVector(forwardDir, options_params.cameraSize);
+                            
+                            var forwardLineGeometry = new THREE.Geometry();
+                            forwardLineGeometry.vertices.push( poiObject.position, forwardLineEndPoint );
+                            pathDataGeometries.push( forwardLineGeometry );
+                            var forwardLine = new THREE.Line( forwardLineGeometry, viewLineMaterial );
+                            forwardLine.name = "path_example_cameras";
+                            forwardLine.visible = options_vis.path_example_cameras;
+                            //scene.add( forwardLine );
+                            towerObject.add( forwardLine );
+                            pathDataGraphics.push( forwardLine );
+                            //-----------------------------------------------
+                        
+                            //-----------------------------------------------
+                            // right line
+                            //-----------------------------------------------
+                            var rightDir = new THREE.Vector3();
+                            rightDir.crossVectors(forwardDir, columnUp);
+                            rightDir.normalize();
+                                        
+                            var rightLineEndPoint = new THREE.Vector3();
+                            rightLineEndPoint.copy(poiObject.position);
+                            rightLineEndPoint.addScaledVector(rightDir, options_params.cameraSize);
+                            
+                            var rightLineGeometry = new THREE.Geometry();
+                            rightLineGeometry.vertices.push( poiObject.position, rightLineEndPoint );
+                            pathDataGeometries.push( rightLineGeometry );
+                            var rightLine = new THREE.Line( rightLineGeometry, viewLineMaterial );
+                            rightLine.name = "path_example_cameras";
+                            rightLine.visible = options_vis.path_example_cameras;
+                            //scene.add( rightLine );
+                            towerObject.add( rightLine );
+                            pathDataGraphics.push( rightLine );
+                            //-----------------------------------------------
+                            
+                            //-----------------------------------------------
+                            //  up line
+                            //-----------------------------------------------
+                            var upDir = new THREE.Vector3();
+                            upDir.crossVectors(rightDir, forwardDir);
+                            upDir.normalize();
+                            
+                            var upLineEndPoint = new THREE.Vector3();
+                            upLineEndPoint.copy(poiObject.position);
+                            upLineEndPoint.addScaledVector(upDir, options_params.cameraSize);
+                            
+                            var upLineGeometry = new THREE.Geometry();
+                            upLineGeometry.vertices.push( poiObject.position, upLineEndPoint );
+                            pathDataGeometries.push( rightLineGeometry );
+                            var upLine = new THREE.Line( upLineGeometry, viewLineMaterial );
+                            upLine.name = "path_example_cameras";
+                            upLine.visible = options_vis.path_example_cameras;
+                            //scene.add( upLine );
+                            towerObject.add( upLine );
+                            pathDataGraphics.push( upLine );
+                            //-----------------------------------------------
+                            
+                            //-----------------------------------------------
+                            //  near screen 
+                            //-----------------------------------------------
+                            var viewScreenTopRight = new THREE.Vector3();
+                            viewScreenTopRight.copy(forwardLineEndPoint);
+                            viewScreenTopRight.add(upDir);
+                            viewScreenTopRight.add(rightDir);
+                            
+                            var viewScreenBottomRight = new THREE.Vector3();
+                            viewScreenBottomRight.copy(forwardLineEndPoint);
+                            viewScreenBottomRight.sub(upDir);
+                            viewScreenBottomRight.add(rightDir);
+                            
+                            var viewScreenBottomLeft = new THREE.Vector3();
+                            viewScreenBottomLeft.copy(forwardLineEndPoint);
+                            viewScreenBottomLeft.sub(upDir);
+                            viewScreenBottomLeft.sub(rightDir);
+                            
+                            var viewScreenTopLeft = new THREE.Vector3();
+                            viewScreenTopLeft.copy(forwardLineEndPoint);
+                            viewScreenTopLeft.add(upDir);
+                            viewScreenTopLeft.sub(rightDir);
+                            
+                            var viewScreenGeometry = new THREE.Geometry();
+                            viewScreenGeometry.vertices.push(
+                                viewScreenTopRight,
+                                viewScreenBottomRight,
+                                viewScreenBottomLeft,
+                                viewScreenTopLeft,
+                                viewScreenTopRight
+                            );
+
+                            pathDataGeometries.push( viewScreenGeometry );
+                            var viewScreenLine = new THREE.Line( viewScreenGeometry, viewLineMaterial );
+                            viewScreenLine.name = "path_example_cameras";
+                            viewScreenLine.visible = options_vis.path_example_cameras;
+                            //scene.add( viewScreenLine );
+                            towerObject.add( viewScreenLine );
+                            pathDataGraphics.push( viewScreenLine );
+                            //-----------------------------------------------
+
+                            //-----------------------------------------------
+                            //  frustum 
+                            //-----------------------------------------------
+                            //var eyeToScreenTopRight = new THREE.Vector3();
+                            var viewFrustumnGeometry = new THREE.Geometry();
+                            viewFrustumnGeometry.vertices.push(
+                                poiObject.position,
+                                viewScreenTopRight,
+                                poiObject.position,
+                                viewScreenBottomRight,
+                                poiObject.position,
+                                viewScreenBottomLeft,
+                                poiObject.position,
+                                viewScreenTopLeft
+                            );
+                            pathDataGeometries.push( viewFrustumnGeometry );
+                            var viewScreenFrustum = new THREE.LineSegments( viewFrustumnGeometry, viewLineMaterial );
+                            viewScreenFrustum.name = "path_example_cameras";
+                            viewScreenFrustum.visible = options_vis.path_example_cameras;
+                            //scene.add( viewScreenFrustum );
+                            towerObject.add( viewScreenFrustum );
+                            pathDataGraphics.push( viewScreenFrustum );
+                            //-----------------------------------------------
+
+					} // for each point of interest at a height
+					
+				} // for each height of interest 
+
+				//-----------------------------------------------
+				// now let's build a couple of paths
+				//-----------------------------------------------
+				
+				//-----------------------------------------------
+				// around and around path
+				//-----------------------------------------------
+				var pathAroundAndAroundLineMaterial = new THREE.LineBasicMaterial({color: 0x00ff00, linewidth: pathLineWidth});
+				var pathAroundAndAroundGeometry = new THREE.Geometry();
+                stringExportWinding = '';
+                
+            //---------------------------------------------
+            // now, before we jump into the path let's pick up the home location of the drone flight
+            // back calculate it into local coords
+            // and add it to the path at the very beginning (and at the end?)
+            //---------------------------------------------
+            //squeak( 'towerData.tower: ' + towerData.tower[0] + ' : ' + towerData.tower[1] + ' : ' + towerData.tower[2]);
+            //squeak( 'towerData.takeoff: ' + towerData.takeoff[0] + ' : ' + towerData.takeoff[1] + ' : ' + towerData.takeoff[2]);
+
+            var oy = transformLatitudeToLocalCoords(towerData.tower[0], towerData.tower[1], towerData.takeoff[0], towerData.takeoff[1]);
+            var ox = transformLongitudeToLocalCoords(towerData.tower[0], towerData.tower[1], towerData.takeoff[0], towerData.takeoff[1]);
+            var takeoffPoint = new THREE.Vector3(ox, towerData.takeoff[2], oy);
+            pathAroundAndAroundGeometry.vertices.push( takeoffPoint );
+
+				for ( var i = 0; i < options_params.numHeightsOfInterest; i++ ) // for each height
+				{
+					for ( var j = 0; j < options_params.numPointsOfInterestPerHeight; j++ ) // for each turn
+					{
+						pathAroundAndAroundGeometry.vertices.push( poiArr[i][j] );
+                        
+            //---------------------------------------------------
+            //var dx = poiArr[i][j].x;
+            //var dy = poiArr[i][j].y;
+            //var dz = poiArr[i][j].z;
+            //squeak('x='+dx+' y='+dy+' z='+dz);
+            //var lat_1 = transformLocalCoordsToLatitude(towerData.tower[0], towerData.tower[1], dx, dz);
+            //var long_1 = transformLocalCoordsToLongitude(towerData.tower[0], towerData.tower[1], dx, dz);
+            //squeak( ': ' + lat_1 + ' : ' + long_1 + ' : ' + dy);
+            //---------------------------------------------------
+
+					}
+				}
+
+                //-----------------------------------------------
+                // convert to global latitude, longitude, altitude
+                //-----------------------------------------------
+                for ( var numVerts = 0; numVerts < pathAroundAndAroundGeometry.vertices.length; numVerts++)
+                {
+                
+                	//---------------------------------------------------------------------------------------------
+					//Added by Bill Piedra 10/14/17 - Break loop at 99 waypoints for DJI
+					//TODO  Add UI checkbox for DJI Missions so it stops at 99 waypoint and creates a new file.
+
+                    
+                    if (numVerts === 98) {
+                        break;
+                    }
+					
+					//End
+					
+                    var dx = pathAroundAndAroundGeometry.vertices[numVerts].x;
+                    var dy = pathAroundAndAroundGeometry.vertices[numVerts].y;
+                    var dz = pathAroundAndAroundGeometry.vertices[numVerts].z;
+                    
+                                      
+                    var lat_1 = transformLocalCoordsToLatitude(towerData.tower[0], towerData.tower[1], dx, dz);
+                    var long_1 = transformLocalCoordsToLongitude(towerData.tower[0], towerData.tower[1], dx, dz);
+                    
+                    
+                    //---------------------------------------------------------------------------------------------
+                    //TODO: Add TILT to stringExportWinding
+                    //Added by Bill Piedra 10-15-17 Changed <BR> to ASCII CRLF in order to output text file indead of browser
+                    //Old line:
+                    //stringExportWinding += (lat_1 + ',' + long_1 + ',' + dy + '<br>');
+                    //---------------------------------------------------------------------------------------------
+
+                    stringExportWinding += (lat_1 + ',' + long_1 + ',' + dy + '\r\n');
+                }
+
+				pathDataGeometries.push( pathAroundAndAroundGeometry );
+				// build up the rect path
+				var pathAroundAndAroundLine = new THREE.Line( pathAroundAndAroundGeometry, pathAroundAndAroundLineMaterial );
+				// register it
+				pathAroundAndAroundLine.name = "path_rect_around";
+				pathAroundAndAroundLine.visible = options_vis.path_rect_around;
+				//scene.add( pathAroundAndAroundLine );
+                towerObject.add( pathAroundAndAroundLine );
+				pathDataGraphics.push( pathAroundAndAroundLine );
+/*
+				// now switch to use the rect path to create the smooth path
+				pathAroundAndAroundSplineCurve = new THREE.SplineCurve3 ( pathAroundAndAroundGeometry.vertices );
+				// extract interpolating points from spline curve
+				var splinePoints = pathAroundAndAroundSplineCurve.getPoints(pathAroundAndAroundGeometry.vertices.length * 10);
+				// jam all of those interpolating points into a new geometry
+				pathAroundAndAroundSplineGeometry = new THREE.Geometry();
+				for(var k = 0; k < splinePoints.length; k++)
+				{
+					pathAroundAndAroundSplineGeometry.vertices.push(splinePoints[k]);  
+				}
+				pathDataGeometries.push( pathAroundAndAroundSplineGeometry );
+				// create a new line primitive from all of this
+				var pathAroundAndAroundSmoothLine = new THREE.Line( pathAroundAndAroundSplineGeometry, pathAroundAndAroundLineMaterial );
+				// register it
+				pathAroundAndAroundSmoothLine.name = "path_smooth_around";
+				pathAroundAndAroundSmoothLine.visible = options_vis.path_smooth_around;
+				//scene.add( pathAroundAndAroundSmoothLine );
+                towerObject.add( pathAroundAndAroundSmoothLine );
+				pathDataGraphics.push( pathAroundAndAroundSmoothLine );
+                */
+				//-----------------------------------------------
+				// up and down path
+                //-----------------------------------------------
+                
+
+				var pathUpAndDownLineMaterial = new THREE.LineBasicMaterial({color: 0xFF8C00, linewidth: pathLineWidth});
+				var pathUpAndDownGeometry = new THREE.Geometry();
+                var bUpDir = true;
+                
+				for ( var j = 0; j < options_params.numPointsOfInterestPerHeight; j++ ) // for each turn
+				{
+					if(bUpDir)
+					{
+						for ( var i = 0; i < options_params.numHeightsOfInterest; i++ ) // for each height
+						{
+							pathUpAndDownGeometry.vertices.push( poiArr[i][j] );
+						}
+					}
+					else
+					{
+						for ( var i = options_params.numHeightsOfInterest-1; i >= 0; i-- ) // for each height
+						{
+							pathUpAndDownGeometry.vertices.push( poiArr[i][j] );
+						}
+					}
+					bUpDir = !bUpDir;
+                }
+                
+
+				pathDataGeometries.push( pathUpAndDownGeometry );
+				// build up the rect path
+				var pathUpAndDownLine = new THREE.Line( pathUpAndDownGeometry, pathUpAndDownLineMaterial );
+				// register it
+				pathUpAndDownLine.name = "path_rect_updown";
+				pathUpAndDownLine.visible = options_vis.path_rect_updown;
+				//scene.add( pathUpAndDownLine );
+                towerObject.add( pathUpAndDownLine );
+				pathDataGraphics.push( pathUpAndDownLine );
+				// now switch to use the rect path to create the smooth path
+/*
+				pathUpAndDownSplineCurve = new THREE.SplineCurve3 ( pathUpAndDownGeometry.vertices );
+				// extract interpolating points from spline curve
+				var splinePoints = pathUpAndDownSplineCurve.getPoints(pathUpAndDownGeometry.vertices.length * 10);
+				// jam all of those interpolating points into a new geometry
+				pathUpAndDownSplineGeometry = new THREE.Geometry();
+				for(var k = 0; k < splinePoints.length; k++)
+				{
+					pathUpAndDownSplineGeometry.vertices.push(splinePoints[k]);  
+				}
+				pathDataGeometries.push( pathUpAndDownSplineGeometry );
+				// create a new line primitive from all of this
+				var pathUpAndDownSmoothLine = new THREE.Line( pathUpAndDownSplineGeometry, pathUpAndDownLineMaterial );
+				// register it
+				pathUpAndDownSmoothLine.name = "path_smooth_updown";
+				pathUpAndDownSmoothLine.visible = options_vis.path_smooth_around;
+				//scene.add( pathUpAndDownSmoothLine );
+                towerObject.add( pathUpAndDownSmoothLine );
+				pathDataGraphics.push( pathUpAndDownSmoothLine );
+*/
+				//-----------------------------------------------
+                
+                //-------------------------------
+                // END EXAMPLE HOI CONSTRUCTION
+                //-------------------------------
+                
+                //-------------------------------
+                // BEGIN REAL HOI CONSTRUCTION
+                //-------------------------------
+                
+                //----------------------------------------------------------------
+                // ok. totally new stuff for new HOIs
+                //----------------------------------------------------------------
+                var numHeights = options_hoi[get_HOI_num_key()];
+                if(numHeights > 0) // if we have any HOI
+                {
+                    // an arrar for the heights
+                    var poiHOIArr = new Array(numHeights); // one for each HOI
+                    
+                    // for each height
+                    for ( var i = 0; i < numHeights; i++ )
+                    {
+                        // height
+                        var y = options_hoi[get_HOI_height_index_key(i)]; // pulling out a HOI height based on string index
+
+                        // what is the center of that ring?
+                        var viewTargetPoint = new THREE.Vector3( 0, y, 0 )
+                        
+                        var num_POI_at_this_HOI = options_hoi[get_POI_num_index_key(i)];
+                        
+                        // an arrary for the POI
+                        poiHOIArr[i] = new Array(num_POI_at_this_HOI);
+                        
+                        // for each POI
+                        for ( var j = 0; j < num_POI_at_this_HOI; j++ )
+                        {
+                            //squeak("for each POI j = " + j + " of " + num_POI_at_this_HOI);
+                            // identify a point of interest
+                            // wox
+                            //var radIncrement = j / options_params.numPointsOfInterestPerHeight * 2 * Math.PI;
+                            //var angle = j / num_POI_at_this_HOI * 2 * Math.PI; // still a default angle
+                            var angle = options_hoi [ get_POI_angle_on_HOI_key ( i , j ) ] * Math.PI / 180.0;
+                            var x = columnRadius * Math.sin(angle);
+                            //var y = i / numHeightsOfInterest * options_params.hTower;
+                            var z = columnRadius * Math.cos(angle);
+                            
+                            //---------------------------------------------
+                            // put a little ball there
+                            // this ball will be the root of the drone camera position
+                            //---------------------------------------------
+                            var poiObject = new THREE.Mesh( cameraNodeGeometry, eyeballMaterial );
+                            poiObject.name = "path_hoi_node";
+                            poiObject.visible = options_vis.path_hoi_node;//options_vis.false;//path_hois;
+                            poiObject.userData.hoi = i;
+                            poiObject.userData.turn = j;
+                            
+                            poiObject.position.x = x;
+                            poiObject.position.y = y;
+                            poiObject.position.z = z;
+                            
+                            //squeak("x = " + towerLocation.x);
+                            
+                            //scene.add( poiObject ); // this makes sure it gets drawn
+                            pathDataGraphics.push( poiObject ); // this allows ut to track it for cleanup
+                            
+                            // now if i instead want to make this poiObject a child of the towerObjec
+                            // then i need to clean it up from
+                            
+                            towerObject.add( poiObject);
+                            //boxObject.add (poiObject);
+                            //objects.push( poiObject ); // controls selectability of these nodes
+                            
+                            poiHOIArr[i][j] = new THREE.Vector3(x, y, z);
+                            
+                            // all of these next objects should become children of the poi node
+                            // what does that mean?
+                            // lets find out
+
+     
+     
+     // build camera geom
+     // label it associated with THIS node
+     // when this node is SELECTED, change visibility
+     // vis should be false, except when flipped by selection code
+     
+     var woxLineMaterial = new THREE.LineBasicMaterial({color: 0xff0000, linewidth: pathLineWidth});
+
+                            //---------------------------------------------
+                            // eye target line - hoi
+                            //---------------------------------------------
+                            var eyeTargetLineGeometry = new THREE.Geometry();
+                            eyeTargetLineGeometry.vertices.push( poiObject.position, viewTargetPoint );
+                            eyeTargetLineGeometry.computeLineDistances(); // magic without which dash doesn't work
+                            pathDataGeometries.push( eyeTargetLineGeometry );
+                            var eyeTargetLine = new THREE.Line( eyeTargetLineGeometry, viewLineDashedMaterial );
+                            //var eyeTargetLine = new THREE.Line( eyeTargetLineGeometry, woxLineMaterial );
+                            
+                            eyeTargetLine.name = "path_hoi_camera";
+                            eyeTargetLine.visible = options_vis.path_hoi_camera;
+                            //eyeTargetLine.userData.hoi = poiObject.userData.hoi;
+                            //eyeTargetLine.userData.turn = poiObject.userData.turn;
+                            //eyeTargetLine.visible = options_vis.path_example_cameras;
+                            //scene.add( eyeTargetLine );
+                            towerObject.add( eyeTargetLine );
+                            //poiObject.add( eyeTargetLine );
+                            pathDataGraphics.push( eyeTargetLine );
+
+                            //-----------------------------------------------
+                            // coordinate system
+                            //-----------------------------------------------
+                            var forwardDir = new THREE.Vector3();
+                            forwardDir.subVectors(viewTargetPoint, poiObject.position);
+                            forwardDir.normalize();
+
+                            var rightDir = new THREE.Vector3();
+                            rightDir.crossVectors(forwardDir, columnUp);
+                            rightDir.normalize();
+
+                            var upDir = new THREE.Vector3();
+                            upDir.crossVectors(rightDir, forwardDir);
+                            upDir.normalize();
+
+                            // incorporate camera tilt
+                            var poiTiltAngle = options_hoi [ get_POI_on_HOI_tilt_key ( i , j ) ] * Math.PI / 180.0;
+                            forwardDir.applyAxisAngle ( rightDir, poiTiltAngle );
+                            upDir.applyAxisAngle( rightDir, poiTiltAngle );
+
+                            //-----------------------------------------------
+                            // forward line
+                            //-----------------------------------------------
+                            var forwardLineEndPoint = new THREE.Vector3();
+                            forwardLineEndPoint.copy(poiObject.position);
+                            forwardLineEndPoint.addScaledVector(forwardDir, options_params.cameraSize);
+                            
+                            var forwardLineGeometry = new THREE.Geometry();
+                            forwardLineGeometry.vertices.push( poiObject.position, forwardLineEndPoint );
+                            pathDataGeometries.push( forwardLineGeometry );
+                            //var forwardLine = new THREE.Line( forwardLineGeometry, viewLineMaterial );
+                            var forwardLine = new THREE.Line( forwardLineGeometry, woxLineMaterial );
+                            
+                            forwardLine.name = "path_hoi_camera";
+                            forwardLine.visible = options_vis.path_hoi_camera;
+                            //forwardLine.userData.hoi = poiObject.userData.hoi;
+                            //forwardLine.userData.turn = poiObject.userData.turn;
+                            //forwardLine.visible = options_vis.path_example_cameras;
+                            
+                            //scene.add( forwardLine );
+                            towerObject.add( forwardLine );
+                            pathDataGraphics.push( forwardLine );
+                            //-----------------------------------------------
+ 
+                            //-----------------------------------------------
+                            // right line
+                            //-----------------------------------------------
+                            var rightLineEndPoint = new THREE.Vector3();
+                            rightLineEndPoint.copy(poiObject.position);
+                            rightLineEndPoint.addScaledVector(rightDir, options_params.cameraSize);
+                            
+                            var rightLineGeometry = new THREE.Geometry();
+                            rightLineGeometry.vertices.push( poiObject.position, rightLineEndPoint );
+                            pathDataGeometries.push( rightLineGeometry );
+                            var rightLine = new THREE.Line( rightLineGeometry, viewLineMaterial );
+                            
+                            rightLine.name = "path_hoi_camera";
+                            rightLine.visible = options_vis.path_hoi_camera;
+                            //rightLine.userData.hoi = poiObject.userData.hoi;
+                            //rightLine.userData.turn = poiObject.userData.turn;
+                            //rightLine.visible = options_vis.path_example_cameras;
+                            
+                            //scene.add( rightLine );
+                            towerObject.add( rightLine );
+                            pathDataGraphics.push( rightLine );
+                            //-----------------------------------------------
+  
+                            //-----------------------------------------------
+                            //  up line
+                            //-----------------------------------------------
+                            var upLineEndPoint = new THREE.Vector3();
+                            upLineEndPoint.copy(poiObject.position);
+                            upLineEndPoint.addScaledVector(upDir, options_params.cameraSize);
+                            
+                            var upLineGeometry = new THREE.Geometry();
+                            upLineGeometry.vertices.push( poiObject.position, upLineEndPoint );
+                            pathDataGeometries.push( rightLineGeometry );
+                            var upLine = new THREE.Line( upLineGeometry, viewLineMaterial );
+                            
+                            upLine.name = "path_hoi_camera";
+                            upLine.visible = options_vis.path_hoi_camera;
+                            //upLine.userData.hoi = poiObject.userData.hoi;
+                            //upLine.userData.turn = poiObject.userData.turn;
+                            //upLine.visible = options_vis.path_example_cameras;
+                            
+                            //scene.add( upLine );
+                            towerObject.add( upLine );
+                            pathDataGraphics.push( upLine );
+                            //-----------------------------------------------
+   
+                            //-----------------------------------------------
+                            //  near screen
+                            //-----------------------------------------------
+                            var viewScreenTopRight = new THREE.Vector3();
+                            viewScreenTopRight.copy(forwardLineEndPoint);
+                            viewScreenTopRight.add(upDir);
+                            viewScreenTopRight.add(rightDir);
+                            
+                            var viewScreenBottomRight = new THREE.Vector3();
+                            viewScreenBottomRight.copy(forwardLineEndPoint);
+                            viewScreenBottomRight.sub(upDir);
+                            viewScreenBottomRight.add(rightDir);
+                            
+                            var viewScreenBottomLeft = new THREE.Vector3();
+                            viewScreenBottomLeft.copy(forwardLineEndPoint);
+                            viewScreenBottomLeft.sub(upDir);
+                            viewScreenBottomLeft.sub(rightDir);
+                            
+                            var viewScreenTopLeft = new THREE.Vector3();
+                            viewScreenTopLeft.copy(forwardLineEndPoint);
+                            viewScreenTopLeft.add(upDir);
+                            viewScreenTopLeft.sub(rightDir);
+                            
+                            var viewScreenGeometry = new THREE.Geometry();
+                            viewScreenGeometry.vertices.push(
+                                                             viewScreenTopRight,
+                                                             viewScreenBottomRight,
+                                                             viewScreenBottomLeft,
+                                                             viewScreenTopLeft,
+                                                             viewScreenTopRight
+                                                             );
+                             pathDataGeometries.push( viewScreenGeometry );
+                             var viewScreenLine = new THREE.Line( viewScreenGeometry, viewLineMaterial );
+                             
+                             viewScreenLine.name = "path_hoi_camera";
+                             viewScreenLine.visible = options_vis.path_hoi_camera;
+                             //viewScreenLine.userData.hoi = poiObject.userData.hoi;
+                             //viewScreenLine.userData.turn = poiObject.userData.turn;
+                             //viewScreenLine.visible = options_vis.path_example_cameras;
+                             
+                             //scene.add( viewScreenLine );
+                             towerObject.add( viewScreenLine );
+                             pathDataGraphics.push( viewScreenLine );
+                             //-----------------------------------------------
+      
+                             //-----------------------------------------------
+                             //  frustum
+                             //-----------------------------------------------
+                             //var eyeToScreenTopRight = new THREE.Vector3();
+                             var viewFrustumnGeometry = new THREE.Geometry();
+                             viewFrustumnGeometry.vertices.push(
+                                                                poiObject.position,
+                                                                viewScreenTopRight,
+                                                                poiObject.position,
+                                                                viewScreenBottomRight,
+                                                                poiObject.position,
+                                                                viewScreenBottomLeft,
+                                                                poiObject.position,
+                                                                viewScreenTopLeft
+                                                                );
+                            pathDataGeometries.push( viewFrustumnGeometry );
+                            var viewScreenFrustum = new THREE.LineSegments( viewFrustumnGeometry, viewLineMaterial );
+                            
+                            viewScreenFrustum.name = "path_hoi_camera";
+                            viewScreenFrustum.visible = options_vis.path_hoi_camera;
+                            //viewScreenFrustum.userData.hoi = poiObject.userData.hoi;
+                            //viewScreenFrustum.userData.turn = poiObject.userData.turn;
+                            //viewScreenFrustum.visible = options_vis.path_example_cameras;
+                            
+                            //scene.add( viewScreenFrustum );
+                            towerObject.add( viewScreenFrustum );
+                            pathDataGraphics.push( viewScreenFrustum );
+                            //-----------------------------------------------
+    
+                        } // for each point of interest at a height
+
+
+                        //-----------------------------------------------
+                        // draw a dashed line circle for each HOI platform
+                        //-----------------------------------------------
+                        var fooSegments = 64;
+                        var radius = getColumnRadius();
+                        
+                        for ( var idxHOICircle = 0; idxHOICircle < numHeights; idxHOICircle++)
+                        {
+                             var circleHOIGeometry = new THREE.Geometry(); // let's make a circle
+
+                             
+                             for ( var jdxHOICircle = 0; jdxHOICircle <= fooSegments; jdxHOICircle++) // extra item to make circle closed
+                             {
+                                 var radinc = jdxHOICircle / fooSegments * 2 * Math.PI;
+                                 var x = radius * Math.cos(radinc);
+                                 var z = radius * Math.sin(radinc);
+                                 
+                                 var vert = new THREE.Vector3();
+                                 vert.set(x,y,z);
+                                 
+                                 circleHOIGeometry.vertices.push( vert );
+                             }
+                        }
+                        circleHOIGeometry.computeLineDistances(); // magic without which dash doesn't work
+                        var circleHOIMaterial = new THREE.LineDashedMaterial({color: 0x8888FF, dashSize: 1, gapSize: 1});
+                        var circleHOILine = new THREE.Line(circleHOIGeometry, circleHOIMaterial);
+                        circleHOILine.name = "circle_hois";
+                        towerObject.add( circleHOILine );
+                        pathDataGraphics.push(circleHOILine);
+
+                    } // for each height
+                   
+                    //-----------------------------------------------
+                    // HOI paths
+                    //-----------------------------------------------
+                    var pathHOILineMaterial = new THREE.LineBasicMaterial({color: 0x00ff00, linewidth: pathLineWidth});
+                    var pathHOIGeometry = new THREE.Geometry();
+                    
+                    var numHeights = options_hoi[get_HOI_num_key()];
+                    for ( var i = 0; i < numHeights; i++ ) // for each height
+                    {
+                        // wox
+                        // for ( var j = 0; j < options_params.numPointsOfInterestPerHeight; j++ ) // for each turn
+                        var num_POI_at_this_HOI = options_hoi[get_POI_num_index_key(i)];
+                        for ( var j = 0; j < num_POI_at_this_HOI; j++ ) // for each turn
+                        {
+                            pathHOIGeometry.vertices.push( poiHOIArr[i][j] );
+                        }
+                    }
+                    
+                    pathDataGeometries.push( pathHOIGeometry );
+                    // build up the rect path
+                    var pathHOILine = new THREE.Line( pathHOIGeometry, pathHOILineMaterial );
+                    // register it
+                    pathHOILine.name = "path_hois";
+                    pathHOILine.visible = options_vis.path_hois;
+                    //scene.add( pathHOILine );
+                    towerObject.add( pathHOILine );
+                    pathDataGraphics.push( pathHOILine );
+                    
+                } // if we have any HOI
+                else
+                {
+                    //squeak("no HOIs");
+                }
+				//----------------------------------------------------------------
+                
+                //-------------------------------
+                // END REAL HOI CONSTRUCTION
+                //-------------------------------
+                
+                //----------------------------------------------------------------
+                //----------------------------------------------------------------
+                //----------------------------------------------------------------
+			}
+
+            //----------------------------------------------------------------
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+            //----------------------------------------------------------------
+			function onDocumentMouseMove( event )
+            {
+                //var bLeftButton = (event.which == 1);
+                
+				event.preventDefault();
+                
+                // we don't want middle and right buttons doing this stuff
+                if(event.which == 2 || event.which == 3)
+                {
+                    return;
+                }
+
+				mouse.x = ( event.clientX / window.innerWidth ) * 2 - 1;
+				mouse.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+
+				raycaster.setFromCamera( mouse, camera );
+
+// we don't want middle and right buttons doing this stuff
+//if(!bLeftButton)
+//{
+    //return;
+//}
+
+if ( bMouseIsDown )
+{
+                // if there is a selected object
+				if ( SELECTED )
+                {
+                    //squeak("SELECTED and name = " + SELECTED.name);
+                    //squeak("hoi = " + SELECTED.userData.hoi);
+                    //squeak("turn = " + SELECTED.userData.turn);
+                    
+                    // if we can get an intersection with the view ray thru the cursor
+                    // the the view perp plane thru the ???
+                    if ( SELECTED.name == "tower" )
+                    {
+                        var towerIntersection = new THREE.Vector3();
+                        if ( raycaster.ray.intersectPlane( towerPlane, towerIntersection ) )
+                        {
+                            // change the position of the selected object
+                            //SELECTED.position.copy( towerIntersection.sub( offset ) );
+                            //towerLocation.copy( towerIntersection.sub( offset ) );
+                            bTowerMoved = true;
+                            towerLocation.copy( towerIntersection );
+                            rebuildTowers();
+                            rebuildFlightPaths();
+                        }
+                    }
+                    else
+					if ( raycaster.ray.intersectPlane( plane, intersection ) )
+                    {
+                        // change the position of the selected object
+						SELECTED.position.copy( intersection.sub( offset ) );
+					}
+					return;
+				}
+}
+                //-------------------------------------------------------------------
+                // else try to get possible selection candidates
+				var intersects = raycaster.intersectObjects( objects );
+                // if we hit some things
+				if ( intersects.length > 0 ) {
+                    // if the currently intersected thing does not match the best candidate
+					if ( INTERSECTED != intersects[ 0 ].object ) {
+                        // this is some broken attempt to prehilight the object
+						if ( INTERSECTED ) INTERSECTED.material.color.setHex( INTERSECTED.currentHex );
+                        // set new current intersected object
+						INTERSECTED = intersects[ 0 ].object;
+						INTERSECTED.currentHex = INTERSECTED.material.color.getHex();
+                        // set a drag plane for later use
+						plane.setFromNormalAndCoplanarPoint(
+							camera.getWorldDirection( plane.normal ),
+							INTERSECTED.position );
+					}
+
+					container.style.cursor = 'pointer';
+                    //squeak("INTERSECTED = " + INTERSECTED.name);
+				}
+                else // we did not hit any things
+                {
+                    // attenpting to turn off prehilight ?
+					if ( INTERSECTED ) INTERSECTED.material.color.setHex( INTERSECTED.currentHex );
+                    // we have no prehighlighted thing
+					INTERSECTED = null;
+
+					container.style.cursor = 'auto';
+				}
+//}
+			}
+        
+            //-----------------------------------------------------------------
+			function onDocumentMouseDown( event )
+            {
+                //squeak("onDocumentMouseDown " + event.which);
+                bMouseIsDown = true;
+                var bLeftButton = (event.which == 1);
+                
+				event.preventDefault();
+                
+                // we don't want middle and right buttons doing this stuff
+                if(!bLeftButton)
+                {
+                    return;
+                }
+
+				raycaster.setFromCamera( mouse, camera );
+
+				var intersects = raycaster.intersectObjects( objects );
+                // if we hit something
+				if ( intersects.length > 0 )
+                {
+                    // stop allowing view manip
+					controls.enabled = false;
+                    
+                    // is there currently a selected object that we are about to drop?
+                    if ( SELECTED )
+                    {
+                        //squeak("UN-SELECTED and name = " + SELECTED.name);
+                        //squeak("hoi = " + SELECTED.userData.hoi);
+                        //squeak("turn = " + SELECTED.userData.turn);
+                        
+                        if(SELECTED.name == "path_hoi_node")
+                        {
+                            // we have selected a hoi node
+                            // find it's related camera geometry and make it visible
+                            setCameraVis("path_hoi_camera", SELECTED.userData.hoi, SELECTED.userData.turn, false);
+                        }
+                    }
+                    
+                    // note which object is selected
+                    // this is the ONLY place where an object becomes selected
+					SELECTED = intersects[ 0 ].object;
+                    
+                    if ( SELECTED )
+                    {
+                        //squeak("NEW-SELECTED and name = " + SELECTED.name);
+                        //squeak("hoi = " + SELECTED.userData.hoi);
+                        //squeak("turn = " + SELECTED.userData.turn);
+                        
+                        if(SELECTED.name == "path_hoi_node")
+                        {
+                            // we have selected a hoi node
+                            // find it's related camera geometry and make it visible
+                            setCameraVis("path_hoi_camera", SELECTED.userData.hoi, SELECTED.userData.turn, true);
+                        }
+                    }
+
+					if ( raycaster.ray.intersectPlane( plane, intersection ) )
+                    {
+						offset.copy( intersection ).sub( SELECTED.position );
+					}
+
+					container.style.cursor = 'move';
+				}
+                else // we hit nothing, so deselect
+                {
+                    if ( SELECTED )
+                    {
+                        //squeak("UN-SELECTED and name = " + SELECTED.name);
+                        //squeak("hoi = " + SELECTED.userData.hoi);
+                        //squeak("turn = " + SELECTED.userData.turn);
+                        
+                        if(SELECTED.name == "path_hoi_node")
+                        {
+                            // we have selected a hoi node
+                            // find it's related camera geometry and make it visible
+                            setCameraVis("path_hoi_camera", SELECTED.userData.hoi, SELECTED.userData.turn, false);
+                        }
+                    }
+                    SELECTED = null;
+                }
+
+			}
+
+            //-----------------------------------------------------------------
+			function onDocumentMouseUp( event )
+            {
+                bMouseIsDown = false;
+                
+				event.preventDefault();
+                //-----------------------------------------------------------------
+                if(bTowerMoved)
+                {
+                    controls.target.copy(towerLocation);
+                }
+                bTowerMoved = false;
+                //-----------------------------------------------------------------
+
+				controls.enabled = true;
+// STOP DESELECTING ON MOUSE UP
+/*
+				if ( INTERSECTED )
+                {
+                    if ( SELECTED )
+                    {
+                        squeak("UN-SELECTED and name = " + SELECTED.name);
+                    }
+                    SELECTED = null;
+				}
+*/
+				container.style.cursor = 'auto';
+
+			}
+
+            //-----------------------------------------------------------------
+			function animate() {
+
+				requestAnimationFrame( animate );
+
+				render();
+				stats.update();
+
+			}
+            //-----------------------------------------------------------------
+			function render() {
+
+				controls.update();
+
+				renderer.render( scene, camera );
+
+			}
+            //-----------------------------------------------------------------
+            function squeak( str )
+            {
+                if( bSqueak )
+                {
+                    console.log(str);
+                }
+            }
+        
+        //-----------------------------------------------------------------
+        // the form of the GUI mirrors the form of the model
+        // when the model chages significantly, we have to rebuild the GUI
+        //-----------------------------------------------------------------
+        function rebuildGUI(change, idx)
+        {
+            if(gui)
+            {
+                // record closed state of these folders to restore as we rebuild
+                gui_params_closed = gui_params.closed;
+                gui_vis_closed = gui_vis.closed;
+                gui_hoi_closed = gui_hoi.closed;
+                gui_params_tower_closed = gui_params_tower.closed;
+                gui_params_example_closed = gui_params_example.closed;
+                gui_vis_example_closed = gui_vis_example.closed;
+                
+                //--------------------------------------------------------------
+                // record hoi states
+                //--------------------------------------------------------------
+                var numHeights = options_hoi[get_HOI_num_key()];
+                var h_offset = 0;
+                if(change == "hoi") {h_offset = 1};
+                for(var i = 0; i < numHeights - h_offset; i++)
+                {
+                    gui_hoi_idx_closed[i] = gui_hoi_idx[i].closed;
+                }
+                if(change == "hoi") // only if we are reacting to hoi change
+                {
+                    gui_hoi_idx_closed[numHeights -1] = false;
+                }
+                //--------------------------------------------------------------
+
+
+                gui_params = null;
+                gui.destroy();
+            }
+            gui = new dat.GUI({width: 250});
+            
+            gui_params = gui.addFolder('Parameters');
+                if(gui_params_closed) {gui_params.close();} else {gui_params.open();}
+                            
+            gui_vis = gui.addFolder('Visibility');
+                if(gui_vis_closed) {gui_vis.close();} else {gui_vis.open();}
+            
+            gui_hoi = gui_params.addFolder('HOI');
+                if(gui_hoi_closed) {gui_hoi.close();} else {gui_hoi.open();}
+            
+            //---------------------------------------------
+            var objExampleExport =
+            {
+                fcnExportWinding:function()
+                {
+                    var www = window.open();
+                    www.document.open();
+                    www.document.write(stringExportWinding);
+                    www.document.close();
+                    
+                    
+                    //---------------------------------------------
+                    //  Added by Bill Piedra 10-15-17
+                    //  Output stringExportWinding to textfile
+                    //  using function download() below
+                    //---------------------------------------------
+
+                    download('mission.csv', stringExportWinding);
+                    alert("Downloaded mission.csv for Litchi.  Please check your downloads folder.");
+                }
+            };
+            
+            
+            //---------------------------------------------
+            //  Added by Bill Piedra 10-15-17 function download(filename,text)
+            //  Automatically downloads text file named to user downloads folder
+            //  TODO Mobile Download
+            //---------------------------------------------
+            
+            function download(filename, text) {
+                var pom = document.createElement('a');
+                pom.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
+                pom.setAttribute('download', filename);
+                
+                if (document.createEvent) {
+                    var event = document.createEvent('MouseEvents');
+                    event.initEvent('click', true, true);
+                    pom.dispatchEvent(event);
+                }
+                else {
+                    pom.click();
+                }
+            }
+            
+            //---------------------------------------------
+            var objHOI =
+            {
+                fcnAddHOI:function()
+                {
+                    //-------------------------------------
+                    // this is the line that adds the new HOI by incrementing the HOI count
+                    // (this does not need a parameter to know where it is supposed to add - there is only one list of hoi)
+                    //-------------------------------------
+                    options_hoi[get_HOI_num_key()]++;
+                    
+                    // what is the index of this last new HOI?
+                    var idxHOI = options_hoi[get_HOI_num_key()]-1;
+                    
+                    // this is the default height of a newly added HOI
+                    options_hoi[get_HOI_height_index_key(idxHOI)] = default_Height_Of_New_HOI;
+                    
+                    // the initial number of POI for this HOI must be set here
+                    options_hoi[get_POI_num_index_key(idxHOI)] = default_Number_Of_POI_For_New_HOI;
+                    
+                    // for each initial POI
+                    for ( var i = 0; i < default_Number_Of_POI_For_New_HOI; i++ )
+                    {
+                        // set the default angle
+                        options_hoi[ get_POI_angle_on_HOI_key ( idxHOI , i)] = 0;
+                        
+                        // set the default tilt
+                        options_hoi[ get_POI_on_HOI_tilt_key ( idxHOI , i)] = 0;
+                    }
+                   
+                    rebuildGUI("hoi");
+                    rebuildFlightPaths();
+                                    }
+            };
+            gui_hoi.add(objHOI, "fcnAddHOI").name("Add HOI ");
+            gui_hoi.add(objHOI, "fcnAddHOI").name("Delete HOI ");
+
+
+            //---------------------------------------------
+            
+            //---------------------------------------------
+            var objPOI =
+            {
+                fcnAddPOI:function(idx)
+                {
+                    // idx is the index of the HOI which is getting a new POI
+                    
+                    // increment the number of POI by one
+                    options_hoi[get_POI_num_index_key(idx)]++;
+                    
+                    // what is the index of this last new POI?
+                    var jdxHOI = options_hoi[get_POI_num_index_key(idx)]-1;
+                    
+                    // should it have a default angle?
+                    options_hoi[ get_POI_angle_on_HOI_key ( idx, jdxHOI ) ] = 0;
+                    
+                    // default tilt
+                    options_hoi[ get_POI_on_HOI_tilt_key ( idx, jdxHOI ) ] = 0;
+                    
+                    rebuildGUI("poi", idx);
+                    rebuildFlightPaths();
+                }
+            }
+            
+            //-----------------------------------------------
+            // gui - presentation
+            //-----------------------------------------------
+            
+                //-----------------------------------------------
+                // Parameters
+                //-----------------------------------------------
+                gui_params_tower = gui_params.addFolder('Tower');
+                    if(gui_params_tower_closed) {gui_params_tower.close();} else {gui_params_tower.open();}
+                    var gui_hTower = gui_params_tower.add(options_params, "hTower", 1, 1000).step(.1).name("Height");
+                    var gui_wTower = gui_params_tower.add(options_params, "wTower", 1, 100).step(.1).name("Width");
+                    var gui_clearanceTower = gui_params_tower.add(options_params, "clearanceTower", 0, 100).step(.1).name("Clearance");
+
+
+                gui_params_example = gui_params.addFolder('Example');
+                    if(gui_params_example_closed) {gui_params_example.close();} else {gui_params_example.open();}
+                    var gui_cameraSize = gui_params_example.add(options_params, "cameraSize", 5, 50).step(.1).name("Camera Size");
+                    var gui_numHeightsOfInterest = gui_params_example.add(options_params, "numHeightsOfInterest", 1, 30).step(1).name("Num HOI");
+                    var gui_numPointsOfInterestPerHeight = gui_params_example.add(options_params, "numPointsOfInterestPerHeight", 1, 32).step(1).name("POI per Height");
+                    gui_params.add(objExampleExport, "fcnExportWinding").name("Export Winding");
+                
+                //-----------------------------------------------
+                // Visibility
+                //-----------------------------------------------
+                var gui_tower = gui_vis.add(options_vis, "tower").name("Tower");
+                var gui_path_hois = gui_vis.add(options_vis, "path_hois").name("HOI Path");
+                var gui_path_hoi_node = gui_vis.add(options_vis, "path_hoi_node").name("HOI Nodes");
+                var gui_path_hoi_camera = gui_vis.add(options_vis, "path_hoi_camera").name("HOI Cameras");
+                gui_vis_example = gui_vis.addFolder('Example');
+                    if(gui_vis_example_closed) {gui_vis_example.close();} else {gui_vis_example.open();}
+                    var gui_path_example_poi_nodes = gui_vis_example.add(options_vis, "path_example_poi_nodes").name("POI");
+                    var gui_path_example_cameras = gui_vis_example.add(options_vis, "path_example_cameras").name("Cameras");
+                    var gui_path_rect_updown = gui_vis_example.add(options_vis, "path_rect_updown").name("Survey Path");
+                    var gui_path_rect_around = gui_vis_example.add(options_vis, "path_rect_around").name("Winding Path");
+                //var gui_path_dji_mission = gui_vis_example.add(options_vis, "dji_mission").name("DJI Mission");
+                //var gui_path_smooth_updown = gui_vis.add(options_vis, "path_smooth_updown").name("Path Smooth UpDown");
+                //var gui_path_smooth_around = gui_vis.add(options_vis, "path_smooth_around").name("Path Smooth Around");
+                
+            //-----------------------------------------------
+            // gui - reaction
+            //-----------------------------------------------
+            //squeak("List of HOI ------------------------");
+            var gui_hois = [];
+            var gui_pois_a = [];
+            var gui_pois_t = [];
+            gui_hoi_idx = [];
+            var numHeights = options_hoi[get_HOI_num_key()];
+            //squeak("numHeights" + numHeights);
+            for(var idx = 0; idx < numHeights; idx = idx + 1)
+            {
+                //squeak("idx = " + idx);
+                gui_hoi_idx[idx] = gui_hoi.addFolder('HOI ' + idx);
+                    if(gui_hoi_idx_closed[idx]) {gui_hoi_idx[idx].close();} else {gui_hoi_idx[idx].open();}
+                
+                gui_pois_a[idx] = [];
+                gui_pois_t[idx] = [];
+                
+                // Height of this HOI
+                gui_hois[idx] = gui_hoi_idx[idx].add(options_hoi, get_HOI_height_index_key(idx), 1, 1000).step(.1).name("Height");
+                gui_hois[idx].onChange(function(value) {	rebuildFlightPaths();})
+                
+                // Add POI
+                gui_hoi_idx[idx].add( {fcnAddPOI : objPOI.fcnAddPOI.bind(this, idx) } , "fcnAddPOI").name("Add POI");
+
+                // List of POI
+                //squeak("List of POI");
+                var num_POI_at_this_HOI = options_hoi[get_POI_num_index_key(idx)];
+                //squeak("num_POI_at_this_HOI = " + num_POI_at_this_HOI);
+                for(var jdx = 0; jdx < num_POI_at_this_HOI; jdx = jdx + 1)
+                {
+                    //squeak("jdx = " + jdx);
+                    var gui_poi_idx = gui_hoi_idx[idx].addFolder('POI ' + jdx);
+
+                    // angle
+                    gui_pois_a[idx][jdx] = gui_poi_idx.add ( options_hoi, get_POI_angle_on_HOI_key ( idx, jdx ), 0, 360).step(1).name("Rotation");
+                    gui_pois_a[idx][jdx].onChange(function(value) { rebuildFlightPaths(); })
+                    
+                    // tilt
+                    gui_pois_t[idx][jdx] = gui_poi_idx.add ( options_hoi, get_POI_on_HOI_tilt_key ( idx, jdx ), -90, 90).step(1).name("Tilt");
+                    gui_pois_t[idx][jdx].onChange(function(value) { rebuildFlightPaths(); })
+                }
+            }
+            gui_hoi_idx_closed  = []; // this should not be needed anymore - nuke it
+            
+            //-----------------------------------------------
+            gui_numHeightsOfInterest.onChange(function(value) {	rebuildFlightPaths();})
+            gui_numPointsOfInterestPerHeight.onChange(function(value) {	rebuildFlightPaths();})
+            gui_hTower.onChange(function(value) {	rebuildTowers(); rebuildFlightPaths();})
+            gui_wTower.onChange(function(value) {	rebuildTowers(); rebuildFlightPaths();})
+            gui_cameraSize.onChange(function(value) {	rebuildFlightPaths();})
+            gui_clearanceTower.onChange(function(value) {	rebuildFlightPaths();})
+            //-----------------------------------------------
+            gui_path_rect_updown.onChange(function(value) { setPathVis("path_rect_updown", value);})
+            //gui_path_smooth_updown.onChange(function(value) { setPathVis("path_smooth_updown", value);})
+            gui_path_rect_around.onChange(function(value) { setPathVis("path_rect_around", value);})
+            gui_path_hois.onChange(function(value) { setPathVis("path_hois", value);})
+            gui_path_hoi_node.onChange(function(value) { setPathVis("path_hoi_node", value);})
+            gui_path_hoi_camera.onChange(function(value) { setPathVis("path_hoi_camera", value);})
+            //gui_path_smooth_around.onChange(function(value) { setPathVis("path_smooth_around", value);})
+            gui_path_example_poi_nodes.onChange(function(value) { setPathVis("path_example_poi_nodes", value);})
+            gui_path_example_cameras.onChange(function(value) { setPathVis("path_example_cameras", value);})
+            gui_tower.onChange(function(value) { setTowerVis("tower", value);})
+            //-----------------------------------------------
+            
+        }
+        
+        //-----------------------------------------------------------------
+        // key for the number of HOI
+        //-----------------------------------------------------------------
+        function get_HOI_num_key()
+        {
+            return ("HOI num");
+        }
+        
+        //-----------------------------------------------------------------
+        // key for the height of each HOI
+        //-----------------------------------------------------------------
+        function get_HOI_height_index_key( index )
+        {
+            return ("HOI height " + index);
+        }
+        
+        //-----------------------------------------------------------------
+        // key for the number of POI per HOI
+        //-----------------------------------------------------------------
+        function get_POI_num_index_key( index )
+        {
+            return ("POI num " + index);
+        }
+        
+        //-----------------------------------------------------------------
+        // key for the angle of POI jdx on HOI idx
+        //-----------------------------------------------------------------
+        function get_POI_angle_on_HOI_key( idx, jdx )
+        {
+            return ("POI angle " + idx + " " + jdx);
+        }
+        
+        //-----------------------------------------------------------------
+        // key for the tilt angle of POI jdx on HOI idx
+        // can do up to N tilt angles indexed by tdx
+        //-----------------------------------------------------------------
+        //function get_POI_on_HOI_tilt_key( idx, jdx, tdx)
+        //{
+        //    return ("POI tilt " + idx + " " + jdx + " " + tdx);
+        //}
+        function get_POI_on_HOI_tilt_key( idx, jdx )
+        {
+            return ("POI tilt " + idx + " " + jdx);
+        }
+
+		</script>
+
+	</body>
+</html>
